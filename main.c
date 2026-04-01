@@ -336,6 +336,59 @@ void draw_button(uint32_t *fb, Button *btn,
                 scale * 0.28f, 0xFFFFFF);
 }
 
+// 辅助函数：计算边缘函数（本质是二维向量叉乘）
+// 返回值 > 0 表示点在向量右侧，< 0 在左侧，0 在线上
+inline int edge_func(int x0, int y0, int x1, int y1, int px, int py) {
+    return (px - x0) * (y1 - y0) - (py - y0) * (x1 - x0);
+}
+
+inline int min3(int a, int b, int c) {
+    int m = a;
+    if (b < m) m = b;
+    if (c < m) m = c;
+    return m;
+}
+
+inline int max3(int a, int b, int c) {
+    int m = a;
+    if (b > m) m = b;
+    if (c > m) m = c;
+    return m;
+}
+
+void draw_triangle(uint32_t *fb, int x0, int y0, int x1, int y1, int x2, int y2, uint32_t color) {
+    // 1. 计算三角形的包围盒 (Bounding Box)
+    int min_x = min3(x0, x1, x2);
+    int max_x = max3(x0, x1, x2);
+    int min_y = min3(y0, y1, y2);
+    int max_y = max3(y0, y1, y2);
+
+    // 2. 这里的坐标判定要遵循 "Center Sampling" (像素中心在三角形内)
+    // 遍历包围盒内的每一个像素
+    for (int y = min_y; y <= max_y; y++) {
+        for (int x = min_x; x <= max_x; x++) {
+            
+            // 取像素中心点坐标 (x+0.5, y+0.5)
+            // 为了避免浮点运算，我们将坐标放大 2 倍处理，或者直接用整数逻辑
+            // 这里的 px, py 对应像素中心
+            float px = x + 0.5f;
+            float py = y + 0.5f;
+
+            // 3. 检查中心点是否在三条边的同一侧
+            // 注意：顶点顺序（顺时针或逆时针）会影响正负号
+            // 下面的逻辑假设是统一的环绕方向
+            int w0 = edge_func(x0, y0, x1, y1, x, y); // 这里简化用整数，实际作业建议用 float 或处理 0.5
+            int w1 = edge_func(x1, y1, x2, y2, x, y);
+            int w2 = edge_func(x2, y2, x0, y0, x, y);
+
+            // 如果都在内侧（对于特定的顶点顺序，w 必须全部 >= 0 或全部 <= 0）
+            if ((w0 >= 0 && w1 >= 0 && w2 >= 0) || (w0 <= 0 && w1 <= 0 && w2 <= 0)) {
+                set_pixel(fb, x, y, color);
+            }
+        }
+    }
+}
+
 // ── 主程序 ───────────────────────────────────────────────────────
 void kernel_main(void) {
 
@@ -403,6 +456,6 @@ void kernel_main(void) {
     // 屏幕分辨率提示（用小字显示在左下角，方便调试）
     draw_string(fb, &font, "RES:", 10, (int)SCREEN_H - 50,
                 scale * 0.25f, 0x888888);
-
+    draw_triangle(fb, 100, 100, 400, 100, 400, 400, 0x0000ff);
     while (1);  // 挂起，持续显示
 }
