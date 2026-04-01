@@ -11,7 +11,7 @@ kernel8.img: boot.o main.o
 	$(CC) -c $< -o $@ -g
 
 %.o: %.c
-	$(CC) -g -ffreestanding -O2 -nostdlib -c $< -o $@
+	$(CC) -g -ffreestanding -O1 -nostdlib -c $< -o $@
 
 clean:
 	rm *.o *.elf *.img
