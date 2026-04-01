@@ -8,10 +8,10 @@ kernel8.img: boot.o main.o
 	$(OBJCOPY) -O binary kernel8.elf kernel8.img
 
 %.o: %.S
-	$(CC) -c $< -o $@
+	$(CC) -c $< -o $@ -g
 
 %.o: %.c
-	$(CC) -ffreestanding -O2 -nostdlib -c $< -o $@
+	$(CC) -g -ffreestanding -O2 -nostdlib -c $< -o $@
 
 clean:
 	rm *.o *.elf *.img
