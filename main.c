@@ -1,125 +1,154 @@
-#include <stdint.h>
 #include <stddef.h>
-
+#include <stdint.h>
 #define STB_TRUETYPE_IMPLEMENTATION
 
-// ── 裸机环境：替换 stb_truetype 依赖的标准库 ──────────────────────
-
-#define HEAP_BASE 0x1000000
-#define HEAP_SIZE (512 * 1024)
+// ── 线性内存分配器 ──────────────────────────────────────────────
+// 使用一块静态区域，每次 malloc 从中顺序分配，free 是空操作。
+// 对于"分配→使用→整体重置"的场景（如逐字符渲染）完全够用。
+#define HEAP_BASE  0x1000000
+#define HEAP_SIZE  (512 * 1024)   // 512 KB，足够 stbtt 用
 
 static uint8_t *heap_ptr = (uint8_t *)HEAP_BASE;
 static uint8_t *heap_end = (uint8_t *)(HEAP_BASE + HEAP_SIZE);
 
-static void heap_reset(void) { heap_ptr = (uint8_t *)HEAP_BASE; }
+static void heap_reset(void) {
+    heap_ptr = (uint8_t *)HEAP_BASE;
+}
 
 static void *bump_malloc(size_t size, void *u) {
     (void)u;
+    // 8 字节对齐
     size = (size + 7) & ~(size_t)7;
-    if (heap_ptr + size > heap_end) return (void *)0;
+    if (heap_ptr + size > heap_end) return (void*)0; // OOM
     void *p = heap_ptr;
     heap_ptr += size;
     return p;
 }
-static void bump_free(void *p, void *u) { (void)p; (void)u; }
 
-#define STBTT_malloc(x, u) bump_malloc(x, u)
-#define STBTT_free(x, u)   bump_free(x, u)
+static void bump_free(void *p, void *u) {
+    (void)p; (void)u;
+    // 线性分配器不支持单独释放，通过 heap_reset() 统一回收
+}
 
-void __assert_func(const char *f, int l, const char *fn, const char *e) { while (1); }
+#define STBTT_malloc(x, u)  bump_malloc(x, u)
+#define STBTT_free(x, u)    bump_free(x, u)
+// ────────────────────────────────────────────────────────────────
+
+void __assert_func(const char *file, int line,
+                   const char *func, const char *failedexpr) {
+    while(1);
+}
 
 void *memset(void *s, int c, size_t n) {
     unsigned char *p = s;
     while (n--) *p++ = (unsigned char)c;
     return s;
 }
+
 void *memcpy(void *dest, const void *src, size_t n) {
     unsigned char *d = dest;
     const unsigned char *s = src;
     while (n--) *d++ = *s++;
     return dest;
 }
-size_t strlen(const char *s) { size_t i = 0; while (s[i]) i++; return i; }
+
+size_t strlen(const char *s) {
+    size_t i = 0;
+    while (s[i]) i++;
+    return i;
+}
 
 double fabs(double x)  { return x < 0 ? -x : x; }
 float  fabsf(float x)  { return x < 0 ? -x : x; }
+
 double sqrt(double x) {
     if (x <= 0) return 0;
-    double r = x;
-    for (int i = 0; i < 8; i++) r = 0.5 * (r + x / r);
-    return r;
+    double res = x;
+    for (int i = 0; i < 8; i++) res = 0.5 * (res + x / res);
+    return res;
 }
+
 double fmod(double x, double y) { return x - (int)(x / y) * y; }
-double pow(double x, double y)  { return x; }
-double cos(double x)   { return 1.0; }
-double acos(double x)  { return 0.0; }
+
+double pow(double x, double y) {
+    if (y == 1.0/3.0) {
+        double res = x;
+        for (int i = 0; i < 8; i++) res = (2.0*res + x/(res*res)) / 3.0;
+        return res;
+    }
+    return x;
+}
+
+double cos(double x)  { return 1.0; }
+double acos(double x) { return 0.0; }
+
 double floor(double x) { int i=(int)x; return (double)((x<i)?(i-1):i); }
 double ceil (double x) { int i=(int)x; return (double)((x>i)?(i+1):i); }
 float  floorf(float x) { int i=(int)x; return (float) ((x<i)?(i-1):i); }
 float  ceilf (float x) { int i=(int)x; return (float) ((x>i)?(i+1):i); }
 
-// font_data.h 由 xxd -i myfont.ttf > font_data.h 生成
-// 里面会有: unsigned char myfont_ttf[] = {...}; unsigned int myfont_ttf_len = ...;
-#include "font_data.h"
 #include "stb_truetype.h"
+#include "font_data_DejaVu.h"
+#include <stdint.h>
 
-// ── 硬件定义 ──────────────────────────────────────────────────────
-#define MBOX_BASE    0x3F00B880
-#define MBOX_READ    ((volatile uint32_t*)(MBOX_BASE + 0x00))
-#define MBOX_STATUS  ((volatile uint32_t*)(MBOX_BASE + 0x18))
-#define MBOX_WRITE   ((volatile uint32_t*)(MBOX_BASE + 0x20))
-#define MBOX_EMPTY   0x40000000
-#define MBOX_FULL    0x80000000
+// ── 硬件定义 ────────────────────────────────────────────────────
+#define MBOX_BASE   0x3F00B880
+#define MBOX_READ   ((volatile uint32_t*)(MBOX_BASE + 0x00))
+#define MBOX_STATUS ((volatile uint32_t*)(MBOX_BASE + 0x18))
+#define MBOX_WRITE  ((volatile uint32_t*)(MBOX_BASE + 0x20))
+#define MBOX_EMPTY  0x40000000
+#define MBOX_FULL   0x80000000
+
+uint32_t __attribute__((aligned(16))) mbox[36];
 
 #define WIDTH  1024
 #define HEIGHT 768
 
-uint32_t __attribute__((aligned(16))) mbox[36];
-
-int mbox_call() {
-    uint32_t r = (((uint32_t)((size_t)&mbox) & ~0xF) | 8);
-    while (*MBOX_STATUS & MBOX_FULL);
-    *MBOX_WRITE = r;
-    while (1) {
-        while (*MBOX_STATUS & MBOX_EMPTY);
-        if (r == *MBOX_READ) return mbox[1] == 0x80000000;
-    }
-}
-
-// ── 绘制工具 ──────────────────────────────────────────────────────
+// ── 工具 ────────────────────────────────────────────────────────
 static inline int iabs(int v) { return v < 0 ? -v : v; }
 
+// ── Bresenham 画线 ───────────────────────────────────────────────
 void draw_line(uint32_t *fb, int x0, int y0, int x1, int y1, uint32_t color) {
-    int dx = iabs(x1-x0), sx = x0<x1?1:-1;
-    int dy = -iabs(y1-y0), sy = y0<y1?1:-1;
-    int err = dx+dy, e2;
+    int dx =  iabs(x1 - x0), sx = x0 < x1 ? 1 : -1;
+    int dy = -iabs(y1 - y0), sy = y0 < y1 ? 1 : -1;
+    int err = dx + dy, e2;
     while (1) {
-        if (x0>=0 && x0<WIDTH && y0>=0 && y0<HEIGHT)
-            fb[y0*WIDTH+x0] = color;
-        if (x0==x1 && y0==y1) break;
-        e2 = 2*err;
-        if (e2>=dy) { err+=dy; x0+=sx; }
-        if (e2<=dx) { err+=dx; y0+=sy; }
+        if (x0 >= 0 && x0 < WIDTH && y0 >= 0 && y0 < HEIGHT)
+            fb[y0 * WIDTH + x0] = color;
+        if (x0 == x1 && y0 == y1) break;
+        e2 = 2 * err;
+        if (e2 >= dy) { err += dy; x0 += sx; }
+        if (e2 <= dx) { err += dx; y0 += sy; }
     }
 }
 
-void draw_char(uint32_t *fb, stbtt_fontinfo *font, int codepoint,
-               int x0, int y0, float scale, uint32_t color) {
+// ── 矢量字符渲染 ─────────────────────────────────────────────────
+// x0, y0 是字符左上角坐标（我们内部自动换算到正确基线位置）
+void draw_ttf_char(uint32_t *fb, stbtt_fontinfo *font,
+                   char c, int x0, int y0, float scale, uint32_t color) {
+
+    // 获取字体度量，计算基线偏移
     int ascent, descent, line_gap;
     stbtt_GetFontVMetrics(font, &ascent, &descent, &line_gap);
+    // baseline 相对于 y0（左上角）的偏移
     int baseline = y0 + (int)(ascent * scale);
 
+    // 每次绘制一个字符前重置堆，让顶点数组从头分配
+    // （因为 stbtt_FreeShape 无法真正释放，统一在这里回收）
     heap_reset();
+
     stbtt_vertex *v;
-    int n = stbtt_GetCodepointShape(font, codepoint, &v);
-    if (n == 0 || !v) return;
+    int n = stbtt_GetCodepointShape(font, (int)(unsigned char)c, &v);
+    if (n == 0 || v == (void*)0) return;
 
     int cur_x = 0, cur_y = 0;
     for (int i = 0; i < n; i++) {
-        int vx  = (int)(v[i].x  * scale) + x0;
-        int vy  = (int)(-v[i].y * scale) + baseline;
-        int cx_ = (int)(v[i].cx * scale) + x0;
-        int cy_ = (int)(-v[i].cy * scale) + baseline;
+        // stbtt Y 轴向上，屏幕 Y 轴向下，所以 y 分量取反后加 baseline
+        int vx = (int)(v[i].x  * scale) + x0;
+        int vy = (int)(-v[i].y * scale) + baseline;   // ← 修正：加 baseline
+        int cx = (int)(v[i].cx * scale) + x0;
+        int cy = (int)(-v[i].cy * scale) + baseline;  // ← 修正
+
         switch (v[i].type) {
         case STBTT_vmove:
             cur_x = vx; cur_y = vy;
@@ -129,56 +158,104 @@ void draw_char(uint32_t *fb, stbtt_fontinfo *font, int codepoint,
             cur_x = vx; cur_y = vy;
             break;
         case STBTT_vcurve:
+            // 二次贝塞尔，8 段细分
             for (int j = 1; j <= 8; j++) {
-                float t = j/8.0f, it = 1.0f-t;
-                int px = (int)(it*it*cur_x + 2*it*t*cx_ + t*t*vx);
-                int py = (int)(it*it*cur_y + 2*it*t*cy_ + t*t*vy);
+                float t  = j / 8.0f;
+                float it = 1.0f - t;
+                int px = (int)(it*it*cur_x + 2*it*t*cx + t*t*vx);
+                int py = (int)(it*it*cur_y + 2*it*t*cy + t*t*vy);
                 draw_line(fb, cur_x, cur_y, px, py, color);
                 cur_x = px; cur_y = py;
             }
             break;
-        default: break;
+        // STBTT_vcubic 在 TrueType 中不出现，但防御性处理
+        default:
+            break;
         }
     }
+    // stbtt_FreeShape 内部调用 STBTT_free，是空操作，无害
     stbtt_FreeShape(font, v);
 }
 
-void draw_string(uint32_t *fb, stbtt_fontinfo *font, const char *str,
-                 int x, int y, float scale, uint32_t color) {
+// ── 渲染一行字符串的辅助函数 ────────────────────────────────────
+void draw_string(uint32_t *fb, stbtt_fontinfo *font,
+                 const char *str, int x, int y, float scale, uint32_t color) {
     for (int i = 0; str[i]; i++) {
-        draw_char(fb, font, (unsigned char)str[i], x, y, scale, color);
+        draw_ttf_char(fb, font, str[i], x, y, scale, color);
+        // 推进 x：使用字形的 advance width
         int adv, lsb;
         stbtt_GetCodepointHMetrics(font, (unsigned char)str[i], &adv, &lsb);
         x += (int)(adv * scale);
     }
 }
 
-// ── 主程序 ────────────────────────────────────────────────────────
+// ── Mailbox ──────────────────────────────────────────────────────
+int mbox_call() {
+    uint32_t r = (uint32_t)((size_t)mbox & ~0xFu) | 8u;
+    while (*MBOX_STATUS & MBOX_FULL);
+    *MBOX_WRITE = r;
+    while (1) {
+        while (*MBOX_STATUS & MBOX_EMPTY);
+        if (*MBOX_READ == r) return mbox[1] == 0x80000000;
+    }
+}
+
+// ── 主程序 ───────────────────────────────────────────────────────
 void kernel_main() {
-    mbox[0] = 35 * 4; mbox[1] = 0;
-    mbox[2] = 0x48003; mbox[3] = 8; mbox[4] = 8; mbox[5] = WIDTH;  mbox[6] = HEIGHT;
-    mbox[7] = 0x48004; mbox[8] = 8; mbox[9] = 8; mbox[10] = WIDTH; mbox[11] = HEIGHT;
-    mbox[12] = 0x48005; mbox[13] = 4; mbox[14] = 4; mbox[15] = 32;
-    mbox[16] = 0x40001; mbox[17] = 8; mbox[18] = 8; mbox[19] = 4096; mbox[20] = 0;
-    mbox[21] = 0;
+
+    // 正确构造 Property Channel tag list
+    int idx = 0;
+    mbox[idx++] = 0;         // [0]  总大小，稍后填
+    mbox[idx++] = 0;         // [1]  请求码
+
+    mbox[idx++] = 0x48003;  // Set Physical Size
+    mbox[idx++] = 8;
+    mbox[idx++] = 0;         // ← request/response code 必须为 0
+    mbox[idx++] = WIDTH;
+    mbox[idx++] = HEIGHT;
+
+    mbox[idx++] = 0x48004;  // Set Virtual Size
+    mbox[idx++] = 8;
+    mbox[idx++] = 0;         // ← 0
+    mbox[idx++] = WIDTH;
+    mbox[idx++] = HEIGHT;
+
+    mbox[idx++] = 0x48005;  // Set Depth
+    mbox[idx++] = 4;
+    mbox[idx++] = 0;         // ← 0
+    mbox[idx++] = 32;
+
+    mbox[idx++] = 0x40001;  // Allocate Buffer
+    mbox[idx++] = 8;
+    mbox[idx++] = 0;         // ← 0
+    mbox[idx++] = 16;        // alignment = 16
+    mbox[idx++] = 0;         // out: size
+
+    mbox[idx++] = 0;         // End tag
+    mbox[0] = idx * 4;       // 正确的总大小 = 22 * 4 = 88
+
+    // 初始化字体
+    stbtt_fontinfo font_info;
+    if (!stbtt_InitFont(&font_info, assets_DejaVuSans_ttf, 0)) {
+        while (1);
+    }
 
     if (mbox_call() && mbox[20] != 0) {
         uint32_t *fb = (uint32_t *)((size_t)mbox[19] & 0x3FFFFFFF);
 
-        // 初始化字体
-        // xxd 生成的数组名由文件名决定，myfont.ttf -> myfont_ttf
-        stbtt_fontinfo font;
-        if (!stbtt_InitFont(&font, assets_Minecraft_ttf, 0)) {
-            while (1); // 字体加载失败，原地挂死
-        }
-
-        // 清屏为深灰
+        // 填充深灰色背景
         for (int i = 0; i < WIDTH * HEIGHT; i++) fb[i] = 0x1A1A1A;
 
-        // 绘制文字，像素高度 64px，白色
-        float scale = stbtt_ScaleForPixelHeight(&font, 64.0f);
-        draw_string(fb, &font, "Hello, World!", 100, 300, scale, 0xFFFFFF);
-        draw_string(fb, &font, "Ni Hao", 100, 100, scale, 0xff0000);
+        // 计算缩放：目标字高 128px
+        float scale = stbtt_ScaleForPixelHeight(&font_info, 128.0f);
+
+        // 绘制单个字符
+        draw_ttf_char(fb, &font_info, 'M', 100, 100, scale, 0xFFCC00);
+        draw_ttf_char(fb, &font_info, 'C', 250, 100, scale, 0x00FF00);
+
+        // 或者直接绘制字符串（字间距自动处理）
+        draw_string(fb, &font_info, "Hello!", 100, 300, scale, 0x00CCFF);
     }
+
     while (1);
 }
