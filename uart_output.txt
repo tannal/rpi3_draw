@@ -1,0 +1,10 @@
+
+
+------------------------------
+  GeminiOS Kernel v0.1 Initializing...
+  Architecture: AArch64 (ARMv8-A)
+  Hardware: Raspberry Pi 3B (BCM2837)
+------------------------------
+
+Boot process complete. Welcome to the mini shell!
+System > 

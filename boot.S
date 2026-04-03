@@ -1,34 +1,34 @@
+// boot.S
 .section ".text.boot"
+
 .global _start
 
 _start:
-    // 1. 只有 Core 0 执行
+    // 1. 读取多核 ID，只允许主核 (ID == 0) 继续
     mrs     x0, mpidr_el1
-    and     x0, x0, #0xFF
+    and     x0, x0, #3
     cbz     x0, master
-hang: 
+    b       halt
+
+halt: 
     wfe
-    b       hang
+    b       halt
 
 master:
-    // 2. 开启 FPU (必须在任何浮点运算前)
-    mov     x0, #(3 << 20)          // CPACR_EL1.FPEN = 0b11
-    msr     cpacr_el1, x0
-    isb
-
-    // 3. 设置栈指针
+    // 2. 设置栈指针 (Stack Pointer)
     ldr     x0, =_start
     mov     sp, x0
 
-    // 4. 清除 BSS 段 (修正逻辑)
+    // 3. 清零 BSS 段 (初始值为 0 的全局变量区)
     ldr     x0, =__bss_start
     ldr     w1, =__bss_size
-    cbz     w1, run_main            // 如果 BSS 大小为 0，跳过
-cbss:
+setup_bss:
+    cbz     w1, run_main
     str     xzr, [x0], #8
-    subs    w1, w1, #8
-    b.gt    cbss
+    sub     w1, w1, #1
+    cbnz    w1, setup_bss
 
 run_main:
+    // 4. 跳转到 C 语言入口
     bl      kernel_main
-    b       hang
+    b       halt
